@@ -6,5 +6,5 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "python-dotenv>=1.2.1",
-    "vision-agents[gemini,getstream]>=0.2.6",
+    "vision-agents[gemini,getstream,ultralytics]>=0.2.6",
 ]

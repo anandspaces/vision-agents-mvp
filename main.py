@@ -7,7 +7,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from golf_coach_service import create_golf_agent, join_golf_call
 from general_coach_service import create_general_agent, join_general_call
@@ -29,31 +29,24 @@ active_sessions: Dict[str, Dict] = {}
 
 class CallRequest(BaseModel):
     """Request model for creating a new agent session."""
-    call_type: Optional[str] = Field(
-        default="default",
-        description="Type of call to create (e.g., 'default', 'video', 'audio')",
-        example="default"
-    )
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "call_type": "default"
             }
         }
+    )
+    
+    call_type: Optional[str] = Field(
+        default="default",
+        description="Type of call to create (e.g., 'default', 'video', 'audio')"
+    )
 
 
 class CallResponse(BaseModel):
     """Response model for successful session creation."""
-    call_id: str = Field(..., description="Unique identifier for the call session")
-    call_type: str = Field(..., description="Type of call created")
-    call_url: str = Field(..., description="URL to join the call/session")
-    agent_type: str = Field(..., description="Type of agent (golf, general, fitness, yoga)")
-    message: str = Field(..., description="Success message")
-    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="Timestamp of session creation")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "call_id": "550e8400-e29b-41d4-a716-446655440000",
                 "call_type": "default",
@@ -63,17 +56,20 @@ class CallResponse(BaseModel):
                 "created_at": "2024-01-03T10:30:00"
             }
         }
+    )
+    
+    call_id: str = Field(..., description="Unique identifier for the call session")
+    call_type: str = Field(..., description="Type of call created")
+    call_url: str = Field(..., description="URL to join the call/session")
+    agent_type: str = Field(..., description="Type of agent (golf, general, fitness, yoga)")
+    message: str = Field(..., description="Success message")
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="Timestamp of session creation")
 
 
 class SessionInfo(BaseModel):
     """Model for session information."""
-    call_id: str = Field(..., description="Unique identifier for the call session")
-    call_type: str = Field(..., description="Type of call")
-    agent_type: str = Field(..., description="Type of agent")
-    status: str = Field(default="active", description="Current status of the session")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "call_id": "550e8400-e29b-41d4-a716-446655440000",
                 "call_type": "default",
@@ -81,6 +77,12 @@ class SessionInfo(BaseModel):
                 "status": "active"
             }
         }
+    )
+    
+    call_id: str = Field(..., description="Unique identifier for the call session")
+    call_type: str = Field(..., description="Type of call")
+    agent_type: str = Field(..., description="Type of agent")
+    status: str = Field(default="active", description="Current status of the session")
 
 
 class SessionListItem(BaseModel):
@@ -92,11 +94,8 @@ class SessionListItem(BaseModel):
 
 class SessionListResponse(BaseModel):
     """Response model for listing all sessions."""
-    active_sessions: int = Field(..., description="Number of active sessions")
-    sessions: List[SessionListItem] = Field(..., description="List of active sessions")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "active_sessions": 2,
                 "sessions": [
@@ -113,33 +112,33 @@ class SessionListResponse(BaseModel):
                 ]
             }
         }
+    )
+    
+    active_sessions: int = Field(..., description="Number of active sessions")
+    sessions: List[SessionListItem] = Field(..., description="List of active sessions")
 
 
 class DeleteSessionResponse(BaseModel):
     """Response model for session deletion."""
-    message: str = Field(..., description="Confirmation message")
-    call_id: str = Field(..., description="ID of the deleted session")
-    agent_type: str = Field(..., description="Type of agent that was deleted")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "message": "Session ended successfully",
                 "call_id": "550e8400-e29b-41d4-a716-446655440000",
                 "agent_type": "golf"
             }
         }
+    )
+    
+    message: str = Field(..., description="Confirmation message")
+    call_id: str = Field(..., description="ID of the deleted session")
+    agent_type: str = Field(..., description="Type of agent that was deleted")
 
 
 class HealthCheckResponse(BaseModel):
     """Response model for health check endpoint."""
-    status: str = Field(..., description="API health status")
-    message: str = Field(..., description="Status message")
-    active_sessions: int = Field(..., description="Number of currently active sessions")
-    endpoints: Dict[str, str] = Field(..., description="Available API endpoints")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "status": "healthy",
                 "message": "Vision Agents API is running",
@@ -152,20 +151,27 @@ class HealthCheckResponse(BaseModel):
                 }
             }
         }
+    )
+    
+    status: str = Field(..., description="API health status")
+    message: str = Field(..., description="Status message")
+    active_sessions: int = Field(..., description="Number of currently active sessions")
+    endpoints: Dict[str, str] = Field(..., description="Available API endpoints")
 
 
 class ErrorResponse(BaseModel):
     """Standard error response model."""
-    detail: str = Field(..., description="Error message")
-    error_code: Optional[str] = Field(None, description="Specific error code")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "detail": "Session not found",
                 "error_code": "SESSION_NOT_FOUND"
             }
         }
+    )
+    
+    detail: str = Field(..., description="Error message")
+    error_code: Optional[str] = Field(None, description="Specific error code")
 
 
 # ==================== Lifespan Management ====================
@@ -524,4 +530,4 @@ async def end_session(call_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9020, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=9020, reload=True)

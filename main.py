@@ -1,11 +1,12 @@
 import logging
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Dict, Optional, List
 from datetime import datetime
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -174,6 +175,45 @@ class ErrorResponse(BaseModel):
     error_code: Optional[str] = Field(None, description="Specific error code")
 
 
+# ==================== Background Task Functions ====================
+
+async def run_agent_session(agent, call, call_id: str, agent_type: str, initial_message: str):
+    """Run the agent session in the background."""
+    try:
+        logger.info(f"🤖 Starting {agent_type} agent for call: {call_id}")
+        
+        # Join the call and start the agent (following the example pattern exactly)
+        async with await agent.join(call):
+            logger.info(f"{agent_type} agent joined call: {call_id}")
+            
+            # CRITICAL: Open demo - this generates the full URL and logs it
+            logger.info(f"Opening demo for call: {call_id}")
+            url = await agent.edge.open_demo(call)
+            logger.info(f"Demo opened with URL: {url}")
+            
+            # Send initial message using simple_response
+            logger.info(f"Sending initial message for call: {call_id}")
+            await agent.llm.simple_response(initial_message)
+            logger.info(f"Initial message sent for call: {call_id}")
+            
+            # Run until the call ends
+            await agent.finish()
+            
+        logger.info(f"{agent_type} call ended: {call_id}")
+        
+        # Clean up session
+        if call_id in active_sessions:
+            active_sessions.pop(call_id)
+            logger.info(f"Session cleaned up: {call_id}")
+            
+    except Exception as e:
+        logger.error(f"Error in {agent_type} agent session {call_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        if call_id in active_sessions:
+            active_sessions.pop(call_id)
+
+
 # ==================== Lifespan Management ====================
 
 @asynccontextmanager
@@ -238,7 +278,7 @@ async def root():
     )
 
 
-@app.post(
+@app.get(
     "/golf",
     response_model=CallResponse,
     status_code=status.HTTP_201_CREATED,
@@ -249,29 +289,41 @@ async def root():
         500: {"model": ErrorResponse, "description": "Internal server error"}
     }
 )
-async def create_golf_session(request: CallRequest = CallRequest()):
+async def create_golf_session(background_tasks: BackgroundTasks):
     """Create a golf coaching session with pose detection."""
     try:
         call_id = str(uuid.uuid4())
-        call_type = request.call_type
+        call_type = "default"
         
         logger.info(f"Creating golf session: {call_id}")
         
         # Create agent
         agent = await create_golf_agent()
         
-        # Get call URL
+        # Create user and call
         await agent.create_user()
         call = await agent.create_call(call_type, call_id)
-        call_url = await agent.edge.get_demo_url(call)
+        
+        # Generate the demo URL with proper GetStream format
+        # The agent.edge.open_demo will create the full URL with token
+        call_url = f"https://getstream.io/video/demos/join/{call_id}"
         
         # Store session info
         active_sessions[call_id] = {
             "agent": agent,
+            "call": call,
             "call_type": call_type,
             "agent_type": "golf",
             "created_at": datetime.now().isoformat()
         }
+        
+        # Start the agent in the background
+        initial_message = (
+            "Hi! I'm your AI golf coach. "
+            "Show me your golf swing when you're ready, and I'll analyze your form "
+            "and provide helpful feedback to improve your technique."
+        )
+        background_tasks.add_task(run_agent_session, agent, call, call_id, "golf", initial_message)
         
         logger.info(f"✅ Golf session created: {call_url}")
         
@@ -291,7 +343,7 @@ async def create_golf_session(request: CallRequest = CallRequest()):
         )
 
 
-@app.post(
+@app.get(
     "/general",
     response_model=CallResponse,
     status_code=status.HTTP_201_CREATED,
@@ -302,29 +354,37 @@ async def create_golf_session(request: CallRequest = CallRequest()):
         500: {"model": ErrorResponse, "description": "Internal server error"}
     }
 )
-async def create_general_session(request: CallRequest = CallRequest()):
+async def create_general_session(background_tasks: BackgroundTasks):
     """Create a general conversational AI session."""
     try:
         call_id = str(uuid.uuid4())
-        call_type = request.call_type
+        call_type = "default"
         
         logger.info(f"Creating general session: {call_id}")
         
         # Create agent
         agent = await create_general_agent()
         
-        # Get call URL
+        # Create user and call
         await agent.create_user()
         call = await agent.create_call(call_type, call_id)
-        call_url = await agent.edge.get_demo_url(call)
+        
+        # Generate the demo URL with proper GetStream format
+        # The agent.edge.open_demo will create the full URL with token
+        call_url = f"https://getstream.io/video/demos/join/{call_id}"
         
         # Store session info
         active_sessions[call_id] = {
             "agent": agent,
+            "call": call,
             "call_type": call_type,
             "agent_type": "general",
             "created_at": datetime.now().isoformat()
         }
+        
+        # Start the agent in the background
+        initial_message = "chat with the user about them."
+        background_tasks.add_task(run_agent_session, agent, call, call_id, "general", initial_message)
         
         logger.info(f"✅ General session created: {call_url}")
         
@@ -333,7 +393,7 @@ async def create_general_session(request: CallRequest = CallRequest()):
             call_type=call_type,
             call_url=call_url,
             agent_type="general",
-            message="General chat session created successfully"
+            message="General chat session created successfully. The agent will start when you join the call."
         )
         
     except Exception as e:
@@ -344,7 +404,7 @@ async def create_general_session(request: CallRequest = CallRequest()):
         )
 
 
-@app.post(
+@app.get(
     "/fitness",
     response_model=CallResponse,
     status_code=status.HTTP_201_CREATED,
@@ -355,29 +415,40 @@ async def create_general_session(request: CallRequest = CallRequest()):
         500: {"model": ErrorResponse, "description": "Internal server error"}
     }
 )
-async def create_fitness_session(request: CallRequest = CallRequest()):
+async def create_fitness_session(background_tasks: BackgroundTasks):
     """Create a fitness training session with pose detection."""
     try:
         call_id = str(uuid.uuid4())
-        call_type = request.call_type
+        call_type = "default"
         
         logger.info(f"Creating fitness session: {call_id}")
         
         # Create agent
         agent = await create_fitness_agent()
         
-        # Get call URL
+        # Create user and call
         await agent.create_user()
         call = await agent.create_call(call_type, call_id)
-        call_url = await agent.edge.get_demo_url(call)
+        
+        # Generate the demo URL
+        call_url = f"https://getstream.io/video/demos/join/{call_id}"
         
         # Store session info
         active_sessions[call_id] = {
             "agent": agent,
+            "call": call,
             "call_type": call_type,
             "agent_type": "fitness",
             "created_at": datetime.now().isoformat()
         }
+        
+        # Start the agent in the background
+        initial_message = (
+            "Hey! I'm your AI fitness trainer. "
+            "I'll watch your form and help you exercise safely and effectively. "
+            "What exercise would you like to work on today?"
+        )
+        background_tasks.add_task(run_agent_session, agent, call, call_id, "fitness", initial_message)
         
         logger.info(f"✅ Fitness session created: {call_url}")
         
@@ -397,7 +468,7 @@ async def create_fitness_session(request: CallRequest = CallRequest()):
         )
 
 
-@app.post(
+@app.get(
     "/yoga",
     response_model=CallResponse,
     status_code=status.HTTP_201_CREATED,
@@ -408,29 +479,41 @@ async def create_fitness_session(request: CallRequest = CallRequest()):
         500: {"model": ErrorResponse, "description": "Internal server error"}
     }
 )
-async def create_yoga_session(request: CallRequest = CallRequest()):
+async def create_yoga_session(background_tasks: BackgroundTasks):
     """Create a yoga instruction session with pose detection."""
     try:
         call_id = str(uuid.uuid4())
-        call_type = request.call_type
+        call_type = "default"
         
         logger.info(f"Creating yoga session: {call_id}")
         
         # Create agent
         agent = await create_yoga_agent()
         
-        # Get call URL
+        # Create user and call
         await agent.create_user()
         call = await agent.create_call(call_type, call_id)
-        call_url = await agent.edge.get_demo_url(call)
+        
+        # Generate the demo URL
+        call_url = f"https://getstream.io/video/demos/join/{call_id}"
         
         # Store session info
         active_sessions[call_id] = {
             "agent": agent,
+            "call": call,
             "call_type": call_type,
             "agent_type": "yoga",
             "created_at": datetime.now().isoformat()
         }
+        
+        # Start the agent in the background
+        initial_message = (
+            "Namaste. I'm your AI yoga instructor. "
+            "I'll guide you through your practice and help you find proper alignment. "
+            "Take a deep breath, and let me know what pose you'd like to work on, "
+            "or if you'd like me to guide you through a sequence."
+        )
+        background_tasks.add_task(run_agent_session, agent, call, call_id, "yoga", initial_message)
         
         logger.info(f"✅ Yoga session created: {call_url}")
         

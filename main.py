@@ -36,44 +36,14 @@ app.add_middleware(
 active_processes = {}
 
 # ============================================
-# CLI SCRIPT TEMPLATE
+# AGENT FILE MAPPING
 # ============================================
 
-CLI_SCRIPT = '''
-import logging
-from dotenv import load_dotenv
-from vision_agents.core import User, Agent, cli
-from vision_agents.core.agents import AgentLauncher
-from vision_agents.plugins import getstream, gemini
-
-logger = logging.getLogger(__name__)
-load_dotenv()
-
-async def create_agent(**kwargs) -> Agent:
-    llm = gemini.Realtime()
-    agent = Agent(
-        edge=getstream.Edge(),
-        agent_user=User(name="My happy AI friend", id="agent"),
-        instructions="You're a voice AI assistant. Keep responses short and conversational. Don't use special characters or formatting. Be friendly and helpful.",
-        llm=llm,
-    )
-    return agent
-
-async def join_call(agent: Agent, call_type: str, call_id: str, **kwargs) -> None:
-    await agent.create_user()
-    call = await agent.create_call(call_type, call_id)
-    logger.info("🤖 Starting Gemini Realtime Agent...")
-    
-    with await agent.join(call):
-        logger.info("Joining call")
-        await agent.edge.open_demo(call)
-        logger.info("LLM ready")
-        await agent.llm.simple_response("chat with the user about them.")
-        await agent.finish()
-
-if __name__ == "__main__":
-    cli(AgentLauncher(create_agent=create_agent, join_call=join_call))
-'''
+AGENT_FILES = {
+    "general": "general_coach_example.py",
+    "golf_coach": "golf_coach_example.py",
+    "yoga_coach": "yoga_coach_example.py"
+}
 
 # ============================================
 # HELPER FUNCTIONS
@@ -132,12 +102,13 @@ async def stop_agent(call_id: str):
         process.kill()
         await process.wait()
         
-        # Clean up temp file
-        try:
-            import os
-            os.unlink(process_info['script_path'])
-        except:
-            pass
+        # Clean up temp file only if it exists
+        if process_info['script_path']:
+            try:
+                import os
+                os.unlink(process_info['script_path'])
+            except:
+                pass
         
         # Remove from active
         del active_processes[call_id]
@@ -164,33 +135,54 @@ async def list_agents():
     }
 
 @app.get("/start-agent")
-async def start_agent():
+async def start_agent(agent_type: str = "general"):
     """
     Start the agent by running CLI as subprocess and capture demo URL
+    
+    Parameters:
+    - agent_type: "general" (default) or "golf_coach"
+    
+    Usage:
+    ```bash
+    curl http://localhost:8000/start-agent
+    curl http://localhost:8000/start-agent?agent_type=golf_coach
+    ```
     
     Returns:
     ```json
     {
         "status": "success",
         "demo_url": "https://getstream.io/video/demos/join/...",
-        "call_id": "..."
+        "call_id": "...",
+        "agent_type": "general"
     }
     ```
     """
     try:
+        # Validate agent type
+        if agent_type not in AGENT_FILES:
+            return {
+                "status": "error",
+                "message": f"Invalid agent_type. Must be one of: {list(AGENT_FILES.keys())}, got: {agent_type}"
+            }
+        
         call_id = str(uuid.uuid4())
-        logger.info(f"🚀 Starting agent subprocess for call: {call_id}")
+        logger.info(f"🚀 Starting {agent_type} agent subprocess for call: {call_id}")
         
-        # Write temporary script file
-        import tempfile
+        # Get the agent file path
         import os
+        agent_file = AGENT_FILES[agent_type]
+        script_path = os.path.join(os.path.dirname(__file__), agent_file)
         
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            f.write(CLI_SCRIPT)
-            script_path = f.name
+        # Check if file exists
+        if not os.path.exists(script_path):
+            return {
+                "status": "error",
+                "message": f"Agent file not found: {agent_file}"
+            }
         
         try:
-            # Run the CLI script as subprocess
+            # Run the agent file directly
             process = await asyncio.create_subprocess_exec(
                 'python', script_path,
                 stdout=asyncio.subprocess.PIPE,
@@ -269,17 +261,19 @@ async def start_agent():
                 # Store process so it keeps running
                 active_processes[actual_call_id] = {
                     'process': process,
-                    'script_path': script_path,
-                    'monitor_task': monitor_task
+                    'script_path': None,  # Not a temp file, so no cleanup needed
+                    'monitor_task': monitor_task,
+                    'agent_type': agent_type
                 }
                 
-                logger.info(f"✅ Agent running in background for call: {actual_call_id}")
+                logger.info(f"✅ {agent_type} agent running in background for call: {actual_call_id}")
                 
                 return {
                     "status": "success",
                     "demo_url": demo_url,
                     "call_id": actual_call_id,
-                    "message": "Agent started successfully. Open the demo_url to join the call.",
+                    "agent_type": agent_type,
+                    "message": f"{agent_type} agent started successfully. Open the demo_url to join the call.",
                     "note": "Agent process running in background"
                 }
             else:
@@ -287,12 +281,19 @@ async def start_agent():
                 return {
                     "status": "error",
                     "message": "Could not capture demo URL from subprocess",
-                    "call_id": call_id
+                    "call_id": call_id,
+                    "agent_type": agent_type
                 }
                 
-        finally:
-            # DON'T clean up temp file or kill process - keep it running
-            pass
+        except Exception as e:
+            logger.error(f"❌ Subprocess error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e),
+                "agent_type": agent_type
+            }
             
     except Exception as e:
         logger.error(f"❌ Error: {e}")
@@ -311,7 +312,6 @@ if __name__ == "__main__":
     import uvicorn
     
     logger.info("🚀 Starting Vision Agent API Server...")
-    logger.info("📡 API: http://localhost:8000/start-agent")
     
     uvicorn.run(
         app,

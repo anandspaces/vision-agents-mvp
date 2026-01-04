@@ -1,616 +1,321 @@
-import logging
-import uuid
+"""
+FastAPI that runs the CLI as subprocess and captures the demo URL
+"""
+
 import asyncio
-from contextlib import asynccontextmanager
-from typing import Dict, Optional, List
-from datetime import datetime
+import logging
+import re
+import sys
+import uuid
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, ConfigDict
-
-from golf_coach_service import create_golf_agent, join_golf_call
-from general_coach_service import create_general_agent, join_general_call
-from fitness_coach_service import create_fitness_agent, join_fitness_call
-from yoga_coach_service import create_yoga_agent, join_yoga_call
+from dotenv import load_dotenv
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(message)s',
+    stream=sys.stdout
+)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 load_dotenv()
 
-# Store active sessions
-active_sessions: Dict[str, Dict] = {}
+app = FastAPI(title="Vision Agent API")
 
-
-# ==================== Pydantic Models ====================
-
-class CallRequest(BaseModel):
-    """Request model for creating a new agent session."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "call_type": "default"
-            }
-        }
-    )
-    
-    call_type: Optional[str] = Field(
-        default="default",
-        description="Type of call to create (e.g., 'default', 'video', 'audio')"
-    )
-
-
-class CallResponse(BaseModel):
-    """Response model for successful session creation."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "call_id": "550e8400-e29b-41d4-a716-446655440000",
-                "call_type": "default",
-                "call_url": "https://stream.example.com/call/550e8400",
-                "agent_type": "golf",
-                "message": "Golf coaching session created successfully",
-                "created_at": "2024-01-03T10:30:00"
-            }
-        }
-    )
-    
-    call_id: str = Field(..., description="Unique identifier for the call session")
-    call_type: str = Field(..., description="Type of call created")
-    call_url: str = Field(..., description="URL to join the call/session")
-    agent_type: str = Field(..., description="Type of agent (golf, general, fitness, yoga)")
-    message: str = Field(..., description="Success message")
-    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(), description="Timestamp of session creation")
-
-
-class SessionInfo(BaseModel):
-    """Model for session information."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "call_id": "550e8400-e29b-41d4-a716-446655440000",
-                "call_type": "default",
-                "agent_type": "golf",
-                "status": "active"
-            }
-        }
-    )
-    
-    call_id: str = Field(..., description="Unique identifier for the call session")
-    call_type: str = Field(..., description="Type of call")
-    agent_type: str = Field(..., description="Type of agent")
-    status: str = Field(default="active", description="Current status of the session")
-
-
-class SessionListItem(BaseModel):
-    """Model for session list item."""
-    call_id: str = Field(..., description="Unique identifier for the call session")
-    agent_type: str = Field(..., description="Type of agent")
-    call_type: str = Field(..., description="Type of call")
-
-
-class SessionListResponse(BaseModel):
-    """Response model for listing all sessions."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "active_sessions": 2,
-                "sessions": [
-                    {
-                        "call_id": "550e8400-e29b-41d4-a716-446655440000",
-                        "agent_type": "golf",
-                        "call_type": "default"
-                    },
-                    {
-                        "call_id": "660e8400-e29b-41d4-a716-446655440001",
-                        "agent_type": "fitness",
-                        "call_type": "default"
-                    }
-                ]
-            }
-        }
-    )
-    
-    active_sessions: int = Field(..., description="Number of active sessions")
-    sessions: List[SessionListItem] = Field(..., description="List of active sessions")
-
-
-class DeleteSessionResponse(BaseModel):
-    """Response model for session deletion."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "message": "Session ended successfully",
-                "call_id": "550e8400-e29b-41d4-a716-446655440000",
-                "agent_type": "golf"
-            }
-        }
-    )
-    
-    message: str = Field(..., description="Confirmation message")
-    call_id: str = Field(..., description="ID of the deleted session")
-    agent_type: str = Field(..., description="Type of agent that was deleted")
-
-
-class HealthCheckResponse(BaseModel):
-    """Response model for health check endpoint."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "status": "healthy",
-                "message": "Vision Agents API is running",
-                "active_sessions": 3,
-                "endpoints": {
-                    "golf": "/golf",
-                    "general": "/general",
-                    "fitness": "/fitness",
-                    "yoga": "/yoga"
-                }
-            }
-        }
-    )
-    
-    status: str = Field(..., description="API health status")
-    message: str = Field(..., description="Status message")
-    active_sessions: int = Field(..., description="Number of currently active sessions")
-    endpoints: Dict[str, str] = Field(..., description="Available API endpoints")
-
-
-class ErrorResponse(BaseModel):
-    """Standard error response model."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "detail": "Session not found",
-                "error_code": "SESSION_NOT_FOUND"
-            }
-        }
-    )
-    
-    detail: str = Field(..., description="Error message")
-    error_code: Optional[str] = Field(None, description="Specific error code")
-
-
-# ==================== Background Task Functions ====================
-
-async def run_agent_session(agent, call, call_id: str, agent_type: str, initial_message: str):
-    """Run the agent session in the background."""
-    try:
-        logger.info(f"🤖 Starting {agent_type} agent for call: {call_id}")
-        
-        # Join the call and start the agent (following the example pattern exactly)
-        async with await agent.join(call):
-            logger.info(f"{agent_type} agent joined call: {call_id}")
-            
-            # CRITICAL: Open demo - this generates the full URL and logs it
-            logger.info(f"Opening demo for call: {call_id}")
-            url = await agent.edge.open_demo(call)
-            logger.info(f"Demo opened with URL: {url}")
-            
-            # Send initial message using simple_response
-            logger.info(f"Sending initial message for call: {call_id}")
-            await agent.llm.simple_response(initial_message)
-            logger.info(f"Initial message sent for call: {call_id}")
-            
-            # Run until the call ends
-            await agent.finish()
-            
-        logger.info(f"{agent_type} call ended: {call_id}")
-        
-        # Clean up session
-        if call_id in active_sessions:
-            active_sessions.pop(call_id)
-            logger.info(f"Session cleaned up: {call_id}")
-            
-    except Exception as e:
-        logger.error(f"Error in {agent_type} agent session {call_id}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        if call_id in active_sessions:
-            active_sessions.pop(call_id)
-
-
-# ==================== Lifespan Management ====================
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manage application lifespan - startup and shutdown events."""
-    # Startup
-    logger.info("🚀 Starting Vision Agents API Server...")
-    logger.info("✅ Server ready to accept requests")
-    
-    yield
-    
-    # Shutdown
-    logger.info("🛑 Shutting down Vision Agents API Server...")
-    # Clean up any active sessions
-    for session_id in list(active_sessions.keys()):
-        logger.info(f"Cleaning up session: {session_id}")
-        active_sessions.pop(session_id, None)
-    logger.info("✅ Cleanup complete")
-
-
-# ==================== FastAPI App Configuration ====================
-
-app = FastAPI(
-    title="Vision Agents API",
-    description="API for creating AI agents with video capabilities for coaching and training",
-    version="1.0.0",
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
-
-# Configure CORS - allow all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# Store active processes
+active_processes = {}
 
-# ==================== API Endpoints ====================
+# ============================================
+# CLI SCRIPT TEMPLATE
+# ============================================
 
-@app.get(
-    "/",
-    response_model=HealthCheckResponse,
-    summary="Health Check",
-    description="Check if the API is running and get basic information"
-)
+CLI_SCRIPT = '''
+import logging
+from dotenv import load_dotenv
+from vision_agents.core import User, Agent, cli
+from vision_agents.core.agents import AgentLauncher
+from vision_agents.plugins import getstream, gemini
+
+logger = logging.getLogger(__name__)
+load_dotenv()
+
+async def create_agent(**kwargs) -> Agent:
+    llm = gemini.Realtime()
+    agent = Agent(
+        edge=getstream.Edge(),
+        agent_user=User(name="My happy AI friend", id="agent"),
+        instructions="You're a voice AI assistant. Keep responses short and conversational. Don't use special characters or formatting. Be friendly and helpful.",
+        llm=llm,
+    )
+    return agent
+
+async def join_call(agent: Agent, call_type: str, call_id: str, **kwargs) -> None:
+    await agent.create_user()
+    call = await agent.create_call(call_type, call_id)
+    logger.info("🤖 Starting Gemini Realtime Agent...")
+    
+    with await agent.join(call):
+        logger.info("Joining call")
+        await agent.edge.open_demo(call)
+        logger.info("LLM ready")
+        await agent.llm.simple_response("chat with the user about them.")
+        await agent.finish()
+
+if __name__ == "__main__":
+    cli(AgentLauncher(create_agent=create_agent, join_call=join_call))
+'''
+
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+def clean_url(url: str) -> str:
+    """
+    Remove ANSI escape codes and other unwanted characters from URL
+    """
+    # Remove ANSI escape codes
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+    url = ansi_escape.sub('', url)
+    
+    # Remove any remaining escape sequences
+    url = re.sub(r'\\u001b\[[0-9;]*m', '', url)
+    
+    # Remove any whitespace
+    url = url.strip()
+    
+    return url
+
+# ============================================
+# API ENDPOINT
+# ============================================
+
+@app.get("/")
 async def root():
-    """Health check endpoint."""
-    return HealthCheckResponse(
-        status="healthy",
-        message="Vision Agents API is running",
-        active_sessions=len(active_sessions),
-        endpoints={
-            "golf": "/golf",
-            "general": "/general",
-            "fitness": "/fitness",
-            "yoga": "/yoga"
-        }
-    )
-
-
-@app.get(
-    "/golf",
-    response_model=CallResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create Golf Coaching Session",
-    description="Create a new golf coaching session with pose detection for swing analysis",
-    responses={
-        201: {"description": "Session created successfully"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
+    return {
+        "status": "healthy",
+        "service": "Vision Agent API",
+        "endpoint": "/start-agent",
+        "active_agents": len(active_processes)
     }
-)
-async def create_golf_session(background_tasks: BackgroundTasks):
-    """Create a golf coaching session with pose detection."""
+
+@app.get("/stop-agent/{call_id}")
+async def stop_agent(call_id: str):
+    """
+    Stop a running agent by call_id
+    
+    Usage:
+    ```bash
+    curl http://localhost:8000/stop-agent/YOUR_CALL_ID
+    ```
+    """
+    if call_id not in active_processes:
+        return {
+            "status": "error",
+            "message": f"No active agent found for call_id: {call_id}"
+        }
+    
+    try:
+        process_info = active_processes[call_id]
+        process = process_info['process']
+        
+        # Kill process
+        process.kill()
+        await process.wait()
+        
+        # Clean up temp file
+        try:
+            import os
+            os.unlink(process_info['script_path'])
+        except:
+            pass
+        
+        # Remove from active
+        del active_processes[call_id]
+        
+        logger.info(f"🛑 Stopped agent for call: {call_id}")
+        
+        return {
+            "status": "success",
+            "message": f"Agent stopped for call_id: {call_id}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+@app.get("/list-agents")
+async def list_agents():
+    """List all active agents"""
+    return {
+        "status": "success",
+        "active_agents": len(active_processes),
+        "call_ids": list(active_processes.keys())
+    }
+
+@app.get("/start-agent")
+async def start_agent():
+    """
+    Start the agent by running CLI as subprocess and capture demo URL
+    
+    Returns:
+    ```json
+    {
+        "status": "success",
+        "demo_url": "https://getstream.io/video/demos/join/...",
+        "call_id": "..."
+    }
+    ```
+    """
     try:
         call_id = str(uuid.uuid4())
-        call_type = "default"
+        logger.info(f"🚀 Starting agent subprocess for call: {call_id}")
         
-        logger.info(f"Creating golf session: {call_id}")
+        # Write temporary script file
+        import tempfile
+        import os
         
-        # Create agent
-        agent = await create_golf_agent()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(CLI_SCRIPT)
+            script_path = f.name
         
-        # Create user and call
-        await agent.create_user()
-        call = await agent.create_call(call_type, call_id)
-        
-        # Generate the demo URL with proper GetStream format
-        # The agent.edge.open_demo will create the full URL with token
-        call_url = f"https://getstream.io/video/demos/join/{call_id}"
-        
-        # Store session info
-        active_sessions[call_id] = {
-            "agent": agent,
-            "call": call,
-            "call_type": call_type,
-            "agent_type": "golf",
-            "created_at": datetime.now().isoformat()
-        }
-        
-        # Start the agent in the background
-        initial_message = (
-            "Hi! I'm your AI golf coach. "
-            "Show me your golf swing when you're ready, and I'll analyze your form "
-            "and provide helpful feedback to improve your technique."
-        )
-        background_tasks.add_task(run_agent_session, agent, call, call_id, "golf", initial_message)
-        
-        logger.info(f"✅ Golf session created: {call_url}")
-        
-        return CallResponse(
-            call_id=call_id,
-            call_type=call_type,
-            call_url=call_url,
-            agent_type="golf",
-            message="Golf coaching session created successfully"
-        )
-        
+        try:
+            # Run the CLI script as subprocess
+            process = await asyncio.create_subprocess_exec(
+                'python', script_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=os.environ.copy()
+            )
+            
+            # Read output line by line
+            demo_url = None
+            timeout = 30  # 30 seconds timeout
+            start_time = asyncio.get_event_loop().time()
+            
+            # Wait for URL and keep logging
+            while True:
+                # Check timeout
+                if asyncio.get_event_loop().time() - start_time > timeout:
+                    logger.error("Timeout waiting for URL")
+                    process.kill()
+                    break
+                
+                try:
+                    line = await asyncio.wait_for(
+                        process.stdout.readline(),
+                        timeout=1.0
+                    )
+                    
+                    if not line:
+                        break
+                    
+                    line = line.decode('utf-8').strip()
+                    logger.info(f"[subprocess] {line}")
+                    
+                    # Look for the demo URL
+                    if "Opening browser to:" in line or "🌐 Opening browser to:" in line:
+                        url_match = re.search(r'(https://getstream\.io/video/demos/join/[^\s]+)', line)
+                        if url_match:
+                            demo_url = clean_url(url_match.group(1))
+                            logger.info(f"✅ Captured URL: {demo_url[:100]}...")
+                            # URL found - break to return it
+                            break
+                    
+                    # Alternative: look for xdg-open error
+                    if "xdg-open: no method available for opening" in line:
+                        url_match = re.search(r"opening '(https://[^']+)'", line)
+                        if url_match:
+                            demo_url = clean_url(url_match.group(1))
+                            logger.info(f"✅ Captured URL from xdg-open: {demo_url[:100]}...")
+                            break
+                    
+                except asyncio.TimeoutError:
+                    continue
+            
+            # After URL is captured, continue monitoring in background
+            async def continue_monitoring():
+                """Keep logging subprocess output"""
+                try:
+                    while True:
+                        line = await process.stdout.readline()
+                        if not line:
+                            break
+                        line = line.decode('utf-8').strip()
+                        if line:
+                            logger.info(f"[subprocess] {line}")
+                except Exception as e:
+                    logger.error(f"Monitoring stopped: {e}")
+            
+            # Return result
+            if demo_url:
+                # Extract call_id from URL
+                call_id_match = re.search(r'/join/([a-f0-9-]+)', demo_url)
+                actual_call_id = call_id_match.group(1) if call_id_match else call_id
+                
+                # Start background monitoring
+                monitor_task = asyncio.create_task(continue_monitoring())
+                
+                # Store process so it keeps running
+                active_processes[actual_call_id] = {
+                    'process': process,
+                    'script_path': script_path,
+                    'monitor_task': monitor_task
+                }
+                
+                logger.info(f"✅ Agent running in background for call: {actual_call_id}")
+                
+                return {
+                    "status": "success",
+                    "demo_url": demo_url,
+                    "call_id": actual_call_id,
+                    "message": "Agent started successfully. Open the demo_url to join the call.",
+                    "note": "Agent process running in background"
+                }
+            else:
+                process.kill()
+                return {
+                    "status": "error",
+                    "message": "Could not capture demo URL from subprocess",
+                    "call_id": call_id
+                }
+                
+        finally:
+            # DON'T clean up temp file or kill process - keep it running
+            pass
+            
     except Exception as e:
-        logger.error(f"Error creating golf session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-
-@app.get(
-    "/general",
-    response_model=CallResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create General Chat Session",
-    description="Create a new general conversational AI session without pose detection",
-    responses={
-        201: {"description": "Session created successfully"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-async def create_general_session(background_tasks: BackgroundTasks):
-    """Create a general conversational AI session."""
-    try:
-        call_id = str(uuid.uuid4())
-        call_type = "default"
-        
-        logger.info(f"Creating general session: {call_id}")
-        
-        # Create agent
-        agent = await create_general_agent()
-        
-        # Create user and call
-        await agent.create_user()
-        call = await agent.create_call(call_type, call_id)
-        
-        # Generate the demo URL with proper GetStream format
-        # The agent.edge.open_demo will create the full URL with token
-        call_url = f"https://getstream.io/video/demos/join/{call_id}"
-        
-        # Store session info
-        active_sessions[call_id] = {
-            "agent": agent,
-            "call": call,
-            "call_type": call_type,
-            "agent_type": "general",
-            "created_at": datetime.now().isoformat()
+        logger.error(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": str(e)
         }
-        
-        # Start the agent in the background
-        initial_message = "chat with the user about them."
-        background_tasks.add_task(run_agent_session, agent, call, call_id, "general", initial_message)
-        
-        logger.info(f"✅ General session created: {call_url}")
-        
-        return CallResponse(
-            call_id=call_id,
-            call_type=call_type,
-            call_url=call_url,
-            agent_type="general",
-            message="General chat session created successfully. The agent will start when you join the call."
-        )
-        
-    except Exception as e:
-        logger.error(f"Error creating general session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
 
-
-@app.get(
-    "/fitness",
-    response_model=CallResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create Fitness Training Session",
-    description="Create a new fitness training session with pose detection for form analysis",
-    responses={
-        201: {"description": "Session created successfully"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-async def create_fitness_session(background_tasks: BackgroundTasks):
-    """Create a fitness training session with pose detection."""
-    try:
-        call_id = str(uuid.uuid4())
-        call_type = "default"
-        
-        logger.info(f"Creating fitness session: {call_id}")
-        
-        # Create agent
-        agent = await create_fitness_agent()
-        
-        # Create user and call
-        await agent.create_user()
-        call = await agent.create_call(call_type, call_id)
-        
-        # Generate the demo URL
-        call_url = f"https://getstream.io/video/demos/join/{call_id}"
-        
-        # Store session info
-        active_sessions[call_id] = {
-            "agent": agent,
-            "call": call,
-            "call_type": call_type,
-            "agent_type": "fitness",
-            "created_at": datetime.now().isoformat()
-        }
-        
-        # Start the agent in the background
-        initial_message = (
-            "Hey! I'm your AI fitness trainer. "
-            "I'll watch your form and help you exercise safely and effectively. "
-            "What exercise would you like to work on today?"
-        )
-        background_tasks.add_task(run_agent_session, agent, call, call_id, "fitness", initial_message)
-        
-        logger.info(f"✅ Fitness session created: {call_url}")
-        
-        return CallResponse(
-            call_id=call_id,
-            call_type=call_type,
-            call_url=call_url,
-            agent_type="fitness",
-            message="Fitness training session created successfully"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error creating fitness session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-
-@app.get(
-    "/yoga",
-    response_model=CallResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create Yoga Instruction Session",
-    description="Create a new yoga instruction session with pose detection for alignment analysis",
-    responses={
-        201: {"description": "Session created successfully"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-async def create_yoga_session(background_tasks: BackgroundTasks):
-    """Create a yoga instruction session with pose detection."""
-    try:
-        call_id = str(uuid.uuid4())
-        call_type = "default"
-        
-        logger.info(f"Creating yoga session: {call_id}")
-        
-        # Create agent
-        agent = await create_yoga_agent()
-        
-        # Create user and call
-        await agent.create_user()
-        call = await agent.create_call(call_type, call_id)
-        
-        # Generate the demo URL
-        call_url = f"https://getstream.io/video/demos/join/{call_id}"
-        
-        # Store session info
-        active_sessions[call_id] = {
-            "agent": agent,
-            "call": call,
-            "call_type": call_type,
-            "agent_type": "yoga",
-            "created_at": datetime.now().isoformat()
-        }
-        
-        # Start the agent in the background
-        initial_message = (
-            "Namaste. I'm your AI yoga instructor. "
-            "I'll guide you through your practice and help you find proper alignment. "
-            "Take a deep breath, and let me know what pose you'd like to work on, "
-            "or if you'd like me to guide you through a sequence."
-        )
-        background_tasks.add_task(run_agent_session, agent, call, call_id, "yoga", initial_message)
-        
-        logger.info(f"✅ Yoga session created: {call_url}")
-        
-        return CallResponse(
-            call_id=call_id,
-            call_type=call_type,
-            call_url=call_url,
-            agent_type="yoga",
-            message="Yoga instruction session created successfully"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error creating yoga session: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-
-@app.get(
-    "/session/{call_id}",
-    response_model=SessionInfo,
-    summary="Get Session Information",
-    description="Retrieve information about a specific active session",
-    responses={
-        200: {"description": "Session information retrieved successfully"},
-        404: {"model": ErrorResponse, "description": "Session not found"}
-    }
-)
-async def get_session_info(call_id: str):
-    """Get information about an active session."""
-    if call_id not in active_sessions:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found"
-        )
-    
-    session = active_sessions[call_id]
-    return SessionInfo(
-        call_id=call_id,
-        call_type=session["call_type"],
-        agent_type=session["agent_type"],
-        status="active"
-    )
-
-
-@app.get(
-    "/sessions",
-    response_model=SessionListResponse,
-    summary="List All Sessions",
-    description="Get a list of all currently active sessions"
-)
-async def list_sessions():
-    """List all active sessions."""
-    sessions_list = [
-        SessionListItem(
-            call_id=call_id,
-            agent_type=info["agent_type"],
-            call_type=info["call_type"]
-        )
-        for call_id, info in active_sessions.items()
-    ]
-    
-    return SessionListResponse(
-        active_sessions=len(active_sessions),
-        sessions=sessions_list
-    )
-
-
-@app.delete(
-    "/session/{call_id}",
-    response_model=DeleteSessionResponse,
-    summary="End Session",
-    description="End an active session and clean up resources",
-    responses={
-        200: {"description": "Session ended successfully"},
-        404: {"model": ErrorResponse, "description": "Session not found"}
-    }
-)
-async def end_session(call_id: str):
-    """End an active session."""
-    if call_id not in active_sessions:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found"
-        )
-    
-    session = active_sessions.pop(call_id)
-    logger.info(f"Session ended: {call_id}")
-    
-    return DeleteSessionResponse(
-        message="Session ended successfully",
-        call_id=call_id,
-        agent_type=session["agent_type"]
-    )
-
+# ============================================
+# RUN SERVER
+# ============================================
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=9020, reload=True)
+    
+    logger.info("🚀 Starting Vision Agent API Server...")
+    logger.info("📡 API: http://localhost:8000/start-agent")
+    
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )

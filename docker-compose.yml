@@ -1,0 +1,23 @@
+services:
+  vision-agents:
+    container_name: vision-agents-mvp
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vision-agents-mvp:latest
+
+    ports:
+      - "9040:9040"
+
+    env_file:
+      - .env
+
+    restart: unless-stopped
+
+    shm_size: "1gb"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9040/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

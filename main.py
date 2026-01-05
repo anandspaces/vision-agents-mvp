@@ -78,6 +78,10 @@ async def root():
         "active_agents": len(active_processes)
     }
 
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
 @app.get("/stop-agent/{call_id}")
 async def stop_agent(call_id: str):
     """
